@@ -7,12 +7,16 @@
 
 # COMMAND ----------
 
-from pyspark.sql.functions import col,isnan, when, count, regexp_replace, year, month, dayofmonth, dayofweek, dayofyear, weekofyear
+from pyspark.sql.functions import col,isnan, when, count, regexp_replace, year, month, dayofmonth, dayofweek, dayofyear, weekofyear, concat
 from pyspark.sql import functions as F
 from pyspark.sql.types import *
 from pyspark.ml.feature import StringIndexer, OneHotEncoder, VectorAssembler
 from pyspark.ml.stat import Correlation
 import pandas as pd
+from pandas.tseries.offsets import MonthEnd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from statsmodels.tsa.seasonal import seasonal_decompose
 
 # COMMAND ----------
 
@@ -48,56 +52,8 @@ vendas = vendas.withColumn('id_data',vendas.id_data.cast(DateType()))
 
 # COMMAND ----------
 
-vendas.printSchema()
-
-# COMMAND ----------
-
-vendas.show()
-
-# COMMAND ----------
-
-vendas.orderBy(col('id_data').asc()).show()
-
-# COMMAND ----------
-
-vendas.orderBy(col('id_data').desc()).show()
-
-# COMMAND ----------
-
-vendas.filter('valor_venda == 0').show()
-
-# COMMAND ----------
-
-vendas.select('id_cliente').distinct().count()
-
-# COMMAND ----------
-
-
-vendas.groupBy('id_data').count().orderBy(col('id_data').desc()).show()
-
-# COMMAND ----------
-
-  lojas.show()
-
-# COMMAND ----------
-
-vendas.filter('valor_venda == 0').count()
-
-# COMMAND ----------
-
-vendas.filter('qtde_venda == 0').count()
-
-# COMMAND ----------
-
-vendas.filter('valor_imposto == 0').count()
-
-# COMMAND ----------
-
-vendas.filter('valor_custo == 0').count()
-
-# COMMAND ----------
-
-vendas.count()
+# MAGIC %md
+# MAGIC ### Autocorrelação
 
 # COMMAND ----------
 
@@ -126,6 +82,55 @@ matrix = Correlation.corr(df_vector, 'corr_features').collect()[0][0]
 corr_matrix = matrix.toArray().tolist() 
 corr_matrix_df = pd.DataFrame(data=corr_matrix, columns = colunas_numericas, index=colunas_numericas) 
 corr_matrix_df .style.background_gradient(cmap='coolwarm').set_precision(2)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Decomposição das Séries Temporais
+# MAGIC 
+# MAGIC #### Vendas Gerais
+
+# COMMAND ----------
+
+vendas = vendas.withColumn('ano_mes', concat(year(vendas.id_data), F.lit('-'),month(vendas.id_data)))
+vendas_por_mes = vendas.select('ano_mes', 'qtde_venda', 'valor_venda').groupBy('ano_mes').agg({'qtde_venda': 'sum', 'valor_venda': 'sum'}).toPandas()
+vendas_por_mes['ano_mes'] = pd.to_datetime(vendas_por_mes['ano_mes'], format='%Y-%m') + MonthEnd(0)
+
+# COMMAND ----------
+
+ax = sns.lineplot(data=vendas_por_mes, x='ano_mes', y='sum(qtde_venda)')
+ax.tick_params(axis='x', rotation=45)
+
+# COMMAND ----------
+
+result_add = seasonal_decompose(vendas_por_mes.set_index('ano_mes')['sum(valor_venda)'].sort_index())
+figure = result_add.plot()
+figure.set_figheight(8)
+figure.set_figwidth(15)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC #### Vendas por loja
+
+# COMMAND ----------
+
+vendas_por_loja = vendas.select('ano_mes', 'id_loja', 'qtde_venda').groupBy('ano_mes', 'id_loja').sum().toPandas()
+vendas_por_loja['ano_mes'] = pd.to_datetime(vendas_por_loja['ano_mes'], format='%Y-%m') + MonthEnd(0)
+
+# COMMAND ----------
+
+vendas_por_loja_merged = pd.merge(vendas_por_loja, lojas.toPandas(), how='inner', on='id_loja')
+
+# COMMAND ----------
+
+vendas_por_loja_merged.head()
+
+# COMMAND ----------
+
+ax = sns.lineplot(data=vendas_por_loja_merged, x='ano_mes', y='sum(qtde_venda)', hue='cod_loja')
+ax.tick_params(axis='x', rotation=45)
+plt.show()
 
 # COMMAND ----------
 
