@@ -53,39 +53,6 @@ vendas = vendas.withColumn('id_data',vendas.id_data.cast(DateType()))
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Autocorrelação
-
-# COMMAND ----------
-
-def autocorr(ret):
-  import pandas as pd
-  s = pd.Series(ret)
-  return float(s.autocorr(lag=1))
-
-auto=F.udf(autocorr, FloatType())
-
-df.groupBy("stock","date").agg(F.collect_list(F.col("return")).alias("return")).withColumn("auto", auto("return")).select("stock","date","auto").show(truncate=False)
-
-
-# COMMAND ----------
-
-colunas_numericas = [ 'qtde_venda',  'valor_venda','valor_imposto','valor_custo']
-
-# convert to vector column first
-vector_col = "corr_features"
-assembler = VectorAssembler(inputCols=colunas_numericas, outputCol=vector_col)
-df_vector = assembler.transform(vendas).select(vector_col)
-
-# get correlation matrix
-matrix = Correlation.corr(df_vector, vector_col)
-matrix = Correlation.corr(df_vector, 'corr_features').collect()[0][0] 
-corr_matrix = matrix.toArray().tolist() 
-corr_matrix_df = pd.DataFrame(data=corr_matrix, columns = colunas_numericas, index=colunas_numericas) 
-corr_matrix_df .style.background_gradient(cmap='coolwarm').set_precision(2)
-
-# COMMAND ----------
-
-# MAGIC %md
 # MAGIC ### Decomposição das Séries Temporais
 # MAGIC 
 # MAGIC #### Vendas Gerais
@@ -131,6 +98,37 @@ vendas_por_loja_merged.head()
 ax = sns.lineplot(data=vendas_por_loja_merged, x='ano_mes', y='sum(qtde_venda)', hue='cod_loja')
 ax.tick_params(axis='x', rotation=45)
 plt.show()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Correlação e Autocorrelação
+
+# COMMAND ----------
+
+colunas_numericas = [ 'qtde_venda',  'valor_venda','valor_imposto','valor_custo']
+
+# convert to vector column first
+vector_col = "corr_features"
+assembler = VectorAssembler(inputCols=colunas_numericas, outputCol=vector_col)
+df_vector = assembler.transform(vendas).select(vector_col)
+
+# get correlation matrix
+matrix = Correlation.corr(df_vector, vector_col)
+matrix = Correlation.corr(df_vector, 'corr_features').collect()[0][0] 
+corr_matrix = matrix.toArray().tolist() 
+corr_matrix_df = pd.DataFrame(data=corr_matrix, columns = colunas_numericas, index=colunas_numericas) 
+corr_matrix_df .style.background_gradient(cmap='coolwarm').set_precision(2)
+
+# COMMAND ----------
+
+vendas_por_dia = vendas.select('id_data', 'qtde_venda').groupBy('id_data').agg({'qtde_venda': 'sum'}).toPandas()
+
+vendas_por_dia = vendas_por_dia.set_index('id_data').sort_index()
+
+ax = pd.plotting.autocorrelation_plot(vendas_por_dia)
+
+ax.set_xlim([0, 550])
 
 # COMMAND ----------
 
