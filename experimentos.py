@@ -17,6 +17,9 @@ from pandas.tseries.offsets import MonthEnd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from statsmodels.tsa.seasonal import seasonal_decompose
+from pyspark.ml.regression import RandomForestRegressor
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.evaluation import RegressionEvaluator
 
 # COMMAND ----------
 
@@ -84,14 +87,7 @@ figure.set_figwidth(15)
 
 vendas_por_loja = vendas.select('ano_mes', 'id_loja', 'qtde_venda').groupBy('ano_mes', 'id_loja').sum().toPandas()
 vendas_por_loja['ano_mes'] = pd.to_datetime(vendas_por_loja['ano_mes'], format='%Y-%m') + MonthEnd(0)
-
-# COMMAND ----------
-
 vendas_por_loja_merged = pd.merge(vendas_por_loja, lojas.toPandas(), how='inner', on='id_loja')
-
-# COMMAND ----------
-
-vendas_por_loja_merged.head()
 
 # COMMAND ----------
 
@@ -143,11 +139,11 @@ ax.set_xlim([0, 550])
 
 # COMMAND ----------
 
-lojas.show()
+lojas = lojas.withColumn('anos_abertos', 2019 - col('ano_abertura'))
 
 # COMMAND ----------
 
-lojas = lojas.withColumn('anos_abertos', 2019 - col('ano_abertura')).show(1)
+lojas.show()
 
 # COMMAND ----------
 
@@ -198,10 +194,6 @@ encoded_lojas = one_hot_encoder.fit(indexed_df).transform(indexed_df)
 
 # COMMAND ----------
 
-encoded_lojas.show()
-
-# COMMAND ----------
-
 # Create a StringIndexer to convert the categorical feature to an indexed column
 string_indexer = StringIndexer(inputCol="fornecedor", outputCol="fornecedor_index")
 indexed_df = string_indexer.fit(produtos).transform(produtos)
@@ -227,47 +219,18 @@ encoded_produtos = one_hot_encoder.fit(indexed_df).transform(indexed_df)
 
 # COMMAND ----------
 
-encoded_produtos.show()
-
-# COMMAND ----------
-
-vendas.show()
-
-# COMMAND ----------
-
-vendas.groupBy('id_tipo_cliente').count().orderBy(col('count').desc()).show(100)
-
-# COMMAND ----------
-
 # MAGIC %md
-# MAGIC ## Pré-processamento
+# MAGIC ## Modelagem
 
 # COMMAND ----------
 
-#colunas = ['id_data', 'id_loja', 'id_produto', 'qtde_venda', 'valor_venda', 'valor_imposto', 'valor_custo', 'ano', 'mes', 'dia_do_mes', 'dia_da_semana', 'dia_do_ano', 'semana_do_ano']
-colunas = ['id_data', 'id_loja', 'id_produto', 'qtde_venda', 'valor_venda', 'valor_imposto', 'valor_custo']
+colunas = ['id_data', 'id_loja', 'id_produto', 'qtde_venda']
 
 colunas_group_by = ['id_data', 'id_loja', 'id_produto']
 
-colunas_sum = ['qtde_venda', 'valor_venda', 'valor_imposto', 'valor_custo']
+colunas_agg = {'qtde_venda': 'sum', 'valor_venda': 'sum'}
 
-colunas_unique = ['ano', 'mes', 'dia_do_mes', 'dia_da_semana', 'dia_do_ano', 'semana_do_ano']
-
-vendas.select(colunas).groupBy(colunas_group_by).agg().show()
-
-# COMMAND ----------
-
-vendas.createOrReplaceTempView("vendas_temp")
-
-sql_str="select id_data, id_loja, id_produto," \
-"sum(qtde_venda)," \
-"sum(valor_venda)," \
-"sum(valor_imposto)," \
-"sum(valor_custo)" \
-" from vendas_temp "  \
-" group by id_data, id_loja, id_produto"
-
-vendas_grouped = spark.sql(sql_str)
+vendas_grouped = vendas.select(colunas).groupBy(colunas_group_by).agg(colunas_agg)
 
 # COMMAND ----------
 
@@ -282,7 +245,7 @@ vendas_grouped = vendas_grouped.withColumn('dia_do_mes', dayofmonth(vendas_group
 vendas_grouped = vendas_grouped.withColumn('dia_da_semana', dayofweek(vendas_grouped.id_data))
 vendas_grouped = vendas_grouped.withColumn('dia_do_ano', dayofyear(vendas_grouped.id_data))
 vendas_grouped = vendas_grouped.withColumn('semana_do_ano', weekofyear(vendas_grouped.id_data))
-vendas_grouped.show() # diminui tamanho pela metade
+vendas_grouped.show()
 
 # COMMAND ----------
 
@@ -295,54 +258,65 @@ vendas_merged = vendas_grouped \
     .join(encoded_lojas, 'id_loja', how='inner') \
     .join(encoded_produtos, vendas_grouped.id_produto==encoded_produtos.produto, how='inner')
 
-# COMMAND ----------
-
-vendas_merged.show()
+vendas_merged.printSchema()
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Criação dos datasets de treino e teste
+# MAGIC ### Criação dos datasets de treino e teste.
 
 # COMMAND ----------
 
-from pyspark.sql.functions import percent_rank
-from pyspark.sql import Window
+selected_columns = [
+    "ano",
+    "mes",
+    "dia_do_mes",
+    "dia_da_semana",
+    "dia_do_ano",
+    "semana_do_ano",
+    "anos_abertos",
+    "loja_vec",
+    "regional_vec",
+    "distrito_vec",
+    "cidade_vec",
+    "uf_vec",
+    "fornecedor_vec",
+    "categoria_vec",
+    "sub_categoria_vec"
+]
 
-# Criando algo parecido com TimeSeriesSplit do sci-kit learn
-folds = []
+target_column = ['sum(qtde_venda)']
 
-# Define the number of splits you want
-n_splits = 5
-  
-# Calculate count of each dataframe rows
-each_len = vendas_df.count() // n_splits
-  
-# Create a copy of original dataframe
-copy_df = prod_df
-  
-# Iterate for each dataframe
-i = 0
-while i < n_splits:
-  
-    # Get the top `each_len` number of rows
-    temp_df = copy_df.limit(each_len)
-  
-    # Truncate the `copy_df` to remove
-    # the contents fetched for `temp_df`
-    copy_df = copy_df.subtract(temp_df)
-    
-    temp_df.append(folds)
-  
-    # Increment the split number
-    i += 1
-
-res = []
-for fold in folds:
-    train, test = fold.randomSplit([0.80,0.20])
-    model.train(train)
-    res.append(model.evaluate(test))
+vendas_selected = vendas_merged.select(selected_columns + target_column)
 
 # COMMAND ----------
 
-vendas_grouped.show()
+assembler = VectorAssembler(inputCols=selected_columns, outputCol='features')
+vendas_vectorized = assembler.transform(vendas_selected)
+
+# COMMAND ----------
+
+train = vendas_vectorized.limit(int(vendas_vectorized.count() * 0.7))
+test = vendas_vectorized.exceptAll(train)
+
+# COMMAND ----------
+
+rf_classifier = RandomForestRegressor(featuresCol='features', labelCol='sum(qtde_venda)', numTrees=5).fit(train)
+
+# COMMAND ----------
+
+train_predictions = rf_classifier.transform(train)
+test_predictions = rf_classifier.transform(test)
+
+# COMMAND ----------
+
+evaluator = RegressionEvaluator(labelCol="sum(qtde_venda)", predictionCol="prediction", metricName="rmse")
+
+train_rmse = evaluator.evaluate(predictions)
+test_rmse = evaluator.evaluate(predictions)
+print(train_rmse)
+print(test_rmse)
+
+# COMMAND ----------
+
+
