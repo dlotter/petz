@@ -7,7 +7,20 @@
 
 # COMMAND ----------
 
-from pyspark.sql.functions import col,isnan, when, count, regexp_replace, year, month, dayofmonth, dayofweek, dayofyear, weekofyear, concat
+from pyspark.sql.functions import (
+    col,
+    isnan,
+    when,
+    count,
+    regexp_replace,
+    year,
+    month,
+    dayofmonth,
+    dayofweek,
+    dayofyear,
+    weekofyear,
+    concat,
+)
 from pyspark.sql import functions as F
 from pyspark.sql.types import *
 from pyspark.ml.feature import StringIndexer, OneHotEncoder, VectorAssembler
@@ -20,6 +33,11 @@ from statsmodels.tsa.seasonal import seasonal_decompose
 from pyspark.ml.regression import RandomForestRegressor
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.evaluation import RegressionEvaluator
+from pyspark.ml.feature import StandardScaler
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml import Pipeline
+from pyspark.sql.functions import udf
+from pyspark.sql.types import DoubleType
 
 # COMMAND ----------
 
@@ -46,6 +64,12 @@ vendas = vendas.withColumn('valor_imposto', vendas['valor_imposto'].cast("float"
 vendas = vendas.withColumn('valor_custo', regexp_replace('valor_custo', ',', '.'))
 vendas = vendas.withColumn('valor_custo', vendas['valor_custo'].cast("float"))
 vendas = vendas.withColumn('id_data',vendas.id_data.cast(DateType()))
+
+# COMMAND ----------
+
+print(vendas.dropna().count())
+print(vendas.count())
+print(vendas.na.drop(how='any').count())
 
 # COMMAND ----------
 
@@ -202,6 +226,13 @@ indexed_df = string_indexer.fit(produtos).transform(produtos)
 one_hot_encoder = OneHotEncoder(inputCol="fornecedor_index", outputCol="fornecedor_vec")
 encoded_df = one_hot_encoder.fit(indexed_df).transform(indexed_df)
 
+string_indexer = StringIndexer(inputCol="produto_nome", outputCol="produto_nome_index")
+indexed_df = string_indexer.fit(encoded_df).transform(encoded_df)
+
+# Create a OneHotEncoder to convert the indexed column to a one-hot encoded column
+one_hot_encoder = OneHotEncoder(inputCol="produto_nome_index", outputCol="produto_nome_vec")
+encoded_df = one_hot_encoder.fit(indexed_df).transform(indexed_df)
+
 string_indexer = StringIndexer(inputCol="categoria", outputCol="categoria_index")
 indexed_df = string_indexer.fit(encoded_df).transform(encoded_df)
 
@@ -228,7 +259,7 @@ colunas = ['id_data', 'id_loja', 'id_produto', 'qtde_venda']
 
 colunas_group_by = ['id_data', 'id_loja', 'id_produto']
 
-colunas_agg = {'qtde_venda': 'sum', 'valor_venda': 'sum'}
+colunas_agg = {'qtde_venda': 'sum'}
 
 vendas_grouped = vendas.select(colunas).groupBy(colunas_group_by).agg(colunas_agg)
 
@@ -281,6 +312,7 @@ selected_columns = [
     "cidade_vec",
     "uf_vec",
     "fornecedor_vec",
+    "produto_nome_vec",
     "categoria_vec",
     "sub_categoria_vec"
 ]
@@ -291,7 +323,26 @@ vendas_selected = vendas_merged.select(selected_columns + target_column)
 
 # COMMAND ----------
 
-assembler = VectorAssembler(inputCols=selected_columns, outputCol='features')
+unlist = udf(lambda x: round(float(list(x)[0]),3), DoubleType())
+
+for i in selected_columns:
+    # VectorAssembler Transformation - Converting column to vector type
+    assembler = VectorAssembler(inputCols=[i],outputCol=i+"_Vect")
+
+    # MinMaxScaler Transformation
+    scaler = StandardScaler(inputCol=i+"_Vect", outputCol=i+"_Scaled")
+
+    # Pipeline of VectorAssembler and MinMaxScaler
+    pipeline = Pipeline(stages=[assembler, scaler])
+
+    # Fitting pipeline on dataframe
+    vendas_selected = pipeline.fit(vendas_selected).transform(vendas_selected).drop(i+"_Vect")
+
+
+# COMMAND ----------
+
+new_selected_columns = [i+"_Scaled" for i in selected_columns]
+assembler = VectorAssembler(inputCols=new_selected_columns, outputCol='features')
 vendas_vectorized = assembler.transform(vendas_selected)
 
 # COMMAND ----------
@@ -312,9 +363,38 @@ test_predictions = rf_classifier.transform(test)
 
 evaluator = RegressionEvaluator(labelCol="sum(qtde_venda)", predictionCol="prediction", metricName="rmse")
 
-train_rmse = evaluator.evaluate(predictions)
-test_rmse = evaluator.evaluate(predictions)
+train_rmse = evaluator.evaluate(train_predictions)
+test_rmse = evaluator.evaluate(test_predictions)
 print(train_rmse)
+print(test_rmse)
+
+# COMMAND ----------
+
+from xgboost.spark import SparkXGBRegressor
+
+# COMMAND ----------
+
+spark_reg_estimator = SparkXGBRegressor(
+  features_col="features",
+  label_col="sum(qtde_venda)",
+  num_workers=2,
+)
+
+# COMMAND ----------
+
+xgb_regressor_model = spark_reg_estimator.fit(train)
+
+# COMMAND ----------
+
+transformed_test_spark_dataframe = xgb_regressor_model.transform(test)
+
+# COMMAND ----------
+
+evaluator = RegressionEvaluator(labelCol="sum(qtde_venda)", predictionCol="prediction", metricName="rmse")
+
+train_rmse = evaluator.evaluate(train_predictions)
+test_rmse = evaluator.evaluate(transformed_test_spark_dataframe)
+# print(train_rmse)
 print(test_rmse)
 
 # COMMAND ----------
