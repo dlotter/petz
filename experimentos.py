@@ -3,6 +3,29 @@
 # MAGIC 
 # MAGIC # Case Petz
 # MAGIC 
+# MAGIC Esse notebook contém a resolução do case de predição de demanda da Petz.
+# MAGIC 
+# MAGIC 
+# MAGIC ## Sumário
+# MAGIC 
+# MAGIC 1. Bibliotecas
+# MAGIC 2. Importação dos Dados
+# MAGIC 3. Análise Exploratória
+# MAGIC     1. Decomposição das séries temporais
+# MAGIC     2. Correlação e Autocorrelação
+# MAGIC 4. Feature Engineering
+# MAGIC     1. Anos Abertos
+# MAGIC     2. One hot encoding
+# MAGIC 5. Modelagem
+# MAGIC     1. Separação componentes da data
+# MAGIC     2. Join nas tabelas
+# MAGIC     3. Criação dos datasets de treino e teste
+# MAGIC     4. Baseline: modelo ingênuo
+# MAGIC     5. Regressão Linear
+# MAGIC     6. Random Forest
+# MAGIC 
+# MAGIC 
+# MAGIC 
 # MAGIC ## Bibliotecas
 
 # COMMAND ----------
@@ -20,24 +43,36 @@ from pyspark.sql.functions import (
     dayofyear,
     weekofyear,
     concat,
+    udf,
+    percent_rank,
+    pandas_udf,
+    PandasUDFType,
+    lag,
+    lit
 )
 from pyspark.sql import functions as F
 from pyspark.sql.types import *
-from pyspark.ml.feature import StringIndexer, OneHotEncoder, VectorAssembler
+from pyspark.sql import Window
+
+from pyspark.ml.regression import RandomForestRegressor, LinearRegression
+from pyspark.ml.feature import (
+    VectorAssembler,
+    StandardScaler,
+    StringIndexer,
+    OneHotEncoder,
+)
+from pyspark.ml.evaluation import RegressionEvaluator
+from pyspark.ml import Pipeline
 from pyspark.ml.stat import Correlation
+
 import pandas as pd
 from pandas.tseries.offsets import MonthEnd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from statsmodels.tsa.seasonal import seasonal_decompose
-from pyspark.ml.regression import RandomForestRegressor
-from pyspark.ml.feature import VectorAssembler
-from pyspark.ml.evaluation import RegressionEvaluator
-from pyspark.ml.feature import StandardScaler
-from pyspark.ml.feature import VectorAssembler
-from pyspark.ml import Pipeline
-from pyspark.sql.functions import udf
-from pyspark.sql.types import DoubleType
+
+# from xgboost.spark import SparkXGBRegressor
+from prophet import Prophet
 
 # COMMAND ----------
 
@@ -97,9 +132,9 @@ ax.tick_params(axis='x', rotation=45)
 
 # COMMAND ----------
 
-result_add = seasonal_decompose(vendas_por_mes.set_index('ano_mes')['sum(valor_venda)'].sort_index())
+result_add = seasonal_decompose(vendas_por_mes.set_index('ano_mes')['sum(qtde_venda)'].sort_index(), model='multiplicative')
 figure = result_add.plot()
-figure.set_figheight(8)
+figure.set_figheight(10)
 figure.set_figwidth(15)
 
 # COMMAND ----------
@@ -164,10 +199,6 @@ ax.set_xlim([0, 550])
 # COMMAND ----------
 
 lojas = lojas.withColumn('anos_abertos', 2019 - col('ano_abertura'))
-
-# COMMAND ----------
-
-lojas.show()
 
 # COMMAND ----------
 
@@ -265,6 +296,11 @@ vendas_grouped = vendas.select(colunas).groupBy(colunas_group_by).agg(colunas_ag
 
 # COMMAND ----------
 
+print(vendas.count())
+print(vendas_grouped.count())
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ### Separação ano, mês, dia, número da semana, número do dia na semana
 
@@ -319,11 +355,13 @@ selected_columns = [
 
 target_column = ['sum(qtde_venda)']
 
-vendas_selected = vendas_merged.select(selected_columns + target_column)
+vendas_selected = vendas_merged.select(selected_columns + target_column + ['id_data', 'id_loja', 'id_produto'])
 
 # COMMAND ----------
 
-unlist = udf(lambda x: round(float(list(x)[0]),3), DoubleType())
+# unlist = udf(lambda x: round(float(list(x)[0]),3), DoubleType())
+
+df = vendas_selected.alias('df')
 
 for i in selected_columns:
     # VectorAssembler Transformation - Converting column to vector type
@@ -336,28 +374,169 @@ for i in selected_columns:
     pipeline = Pipeline(stages=[assembler, scaler])
 
     # Fitting pipeline on dataframe
-    vendas_selected = pipeline.fit(vendas_selected).transform(vendas_selected).drop(i+"_Vect")
+    df = pipeline.fit(df).transform(df).drop(i+"_Vect")
 
 
 # COMMAND ----------
 
-new_selected_columns = [i+"_Scaled" for i in selected_columns]
-assembler = VectorAssembler(inputCols=new_selected_columns, outputCol='features')
-vendas_vectorized = assembler.transform(vendas_selected)
+# features_columns = [i+"_Scaled" for i in selected_columns]
+features_columns = ['ano', 'mes', 'loja_vec', 'produto_nome_vec']
+assembler = VectorAssembler(inputCols=features_columns, outputCol='features')
+vendas_vectorized = assembler.transform(df)
 
 # COMMAND ----------
 
-train = vendas_vectorized.limit(int(vendas_vectorized.count() * 0.7))
-test = vendas_vectorized.exceptAll(train)
+train_test_data = vendas_vectorized.withColumn("rank", percent_rank().over(Window.partitionBy().orderBy("id_data")))
+
+train = train_test_data.where("rank <= .8").drop("rank")
+test = train_test_data.where("rank > .8").drop("rank")
 
 # COMMAND ----------
 
-rf_classifier = RandomForestRegressor(featuresCol='features', labelCol='sum(qtde_venda)', numTrees=5).fit(train)
+print("Train antes: ", train.count(), train.rdd.getNumPartitions())
+print("Test antes: ", test.count(), test.rdd.getNumPartitions())
+train_partitions = train.repartition(15)
+test_partitions = test.repartition(10)
+print("Train depois: ", train_partitions.count(), train_partitions.rdd.getNumPartitions())
+print("Test depois: ", test_partitions.count(), test_partitions.rdd.getNumPartitions())
 
 # COMMAND ----------
 
-train_predictions = rf_classifier.transform(train)
-test_predictions = rf_classifier.transform(test)
+# MAGIC %md
+# MAGIC ### Baseline: modelo ingênuo
+# MAGIC 
+# MAGIC Para esse modelo, vamos pegar a média de quantidades vendidas dos produtos por loja e por dia-mês.
+
+# COMMAND ----------
+
+train_naive_fit = train_partitions.select('ano', 'mes', 'id_loja', 'id_produto', 'sum(qtde_venda)').groupBy('ano', 'mes', 'id_loja', 'id_produto').agg({'sum(qtde_venda)': 'mean'})
+
+# COMMAND ----------
+
+train_naive_predict = train_partitions.select('ano', 'mes', 'id_loja', 'id_produto', 'sum(qtde_venda)').join(train_naive_fit, ['ano', 'mes', 'id_loja', 'id_produto']).withColumnRenamed('avg(sum(qtde_venda))',"prediction")
+
+# COMMAND ----------
+
+test_naive_predict = test_partitions.select('ano', 'mes', 'id_loja', 'id_produto', 'sum(qtde_venda)').join(train_naive_fit, ['ano', 'mes', 'id_loja', 'id_produto']).withColumnRenamed('avg(sum(qtde_venda))',"prediction")
+
+# COMMAND ----------
+
+evaluator = RegressionEvaluator(labelCol="sum(qtde_venda)", predictionCol="prediction", metricName="rmse")
+
+train_rmse = evaluator.evaluate(train_naive_predict)
+test_rmse = evaluator.evaluate(test_naive_predict)
+print(train_rmse)
+print(test_rmse)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Regressão Linear
+
+# COMMAND ----------
+
+lr_classifier = LinearRegression(featuresCol='features', labelCol='sum(qtde_venda)').fit(train_partitions)
+lr_train_predictions = lr_classifier.transform(train_partitions)
+lr_test_predictions = lr_classifier.transform(test_partitions)
+
+evaluator = RegressionEvaluator(labelCol="sum(qtde_venda)", predictionCol="prediction", metricName="rmse")
+
+lr_train_rmse = evaluator.evaluate(lr_train_predictions)
+lr_test_rmse = evaluator.evaluate(lr_test_predictions)
+print(lr_train_rmse)
+print(lr_test_rmse)
+
+# COMMAND ----------
+
+window = Window.partitionBy('id_loja', 'id_produto').orderBy("id_data")
+
+train_lagged = train_partitions.withColumn("lag",lag("sum(qtde_venda)",1).over(window))
+
+# COMMAND ----------
+
+# Create a StringIndexer to convert the categorical feature to an indexed column
+string_indexer = StringIndexer(inputCol="id_loja", outputCol="id_loja_idx")
+indexed_df = string_indexer.fit(train_partitions).transform(train_partitions)
+
+# Create a StringIndexer to convert the categorical feature to an indexed column
+string_indexer = StringIndexer(inputCol="id_produto", outputCol="id_produto_idx")
+indexed_df = string_indexer.fit(indexed_df).transform(indexed_df)
+
+# COMMAND ----------
+
+schema = StructType([
+                     StructField('id_loja_idx', FloatType()),
+                     StructField('id_produto_idx', FloatType()),
+                     StructField('ds', TimestampType()),
+                     StructField('y', FloatType()),
+                     StructField('yhat', DoubleType()),
+                     StructField('yhat_upper', DoubleType()),
+                     StructField('yhat_lower', DoubleType()),
+])
+
+# COMMAND ----------
+
+# define the Pandas UDF
+@pandas_udf(schema, PandasUDFType.GROUPED_MAP)
+def apply_model(store_pd):
+    # instantiate the model and set parameters
+    model = Prophet(
+        interval_width=0.95,
+        growth="linear",
+        daily_seasonality=False,
+        weekly_seasonality=True,
+        yearly_seasonality=True,
+        seasonality_mode="multiplicative",
+    )
+    # fit the model to historical data
+    model.fit(store_pd)
+    # Create a data frame that lists 90 dates starting from Jan 1 2018
+    future = model.make_future_dataframe(periods=90, freq="d", include_history=True)
+    # Out of sample prediction
+    future = model.predict(future)
+     # Create a data frame that contains store, item, y, and yhat
+    f_pd = future[['ds', 'yhat', 'yhat_upper', 'yhat_lower']]
+    f_pd['ds'] = pd.to_datetime(f_pd['ds'])
+    st_pd = store_pd[['ds', 'id_loja_idx', 'id_produto_idx', 'y']]
+    st_pd['ds'] = pd.to_datetime(st_pd['ds'])
+    result_pd = f_pd.join(st_pd.set_index('ds'), on='ds', how='left')
+    # fill store and item
+    result_pd['id_loja_idx'] = store_pd['id_loja_idx'].iloc[0]
+    result_pd['id_produto_idx'] = store_pd['id_produto_idx'].iloc[0]
+    return result_pd[['id_loja_idx', 'id_produto_idx', 'ds', 'y', 'yhat',
+                    'yhat_upper', 'yhat_lower']]
+
+
+# Apply the function to all store-items
+results = (
+    indexed_df.select("id_data", "sum(qtde_venda)", 'id_loja_idx', 'id_produto_idx')
+    .withColumnRenamed("id_data", "ds")
+    .withColumnRenamed("sum(qtde_venda)", "y")
+    .groupBy('id_loja_idx', 'id_produto_idx')
+    .apply(apply_model)
+)
+
+# COMMAND ----------
+
+indexed_df.select('id_data', 'sum(qtde_venda)').orderBy(col('id_data').desc()).show()
+
+# COMMAND ----------
+
+results.orderBy(col('ds').desc()).show()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Random Forest
+
+# COMMAND ----------
+
+rf_classifier = RandomForestRegressor(featuresCol='features', labelCol='sum(qtde_venda)', numTrees=5).fit(train_partitions)
+
+# COMMAND ----------
+
+train_predictions = rf_classifier.transform(train_partitions)
+test_predictions = rf_classifier.transform(test_partitions)
 
 # COMMAND ----------
 
@@ -367,36 +546,3 @@ train_rmse = evaluator.evaluate(train_predictions)
 test_rmse = evaluator.evaluate(test_predictions)
 print(train_rmse)
 print(test_rmse)
-
-# COMMAND ----------
-
-from xgboost.spark import SparkXGBRegressor
-
-# COMMAND ----------
-
-spark_reg_estimator = SparkXGBRegressor(
-  features_col="features",
-  label_col="sum(qtde_venda)",
-  num_workers=2,
-)
-
-# COMMAND ----------
-
-xgb_regressor_model = spark_reg_estimator.fit(train)
-
-# COMMAND ----------
-
-transformed_test_spark_dataframe = xgb_regressor_model.transform(test)
-
-# COMMAND ----------
-
-evaluator = RegressionEvaluator(labelCol="sum(qtde_venda)", predictionCol="prediction", metricName="rmse")
-
-train_rmse = evaluator.evaluate(train_predictions)
-test_rmse = evaluator.evaluate(transformed_test_spark_dataframe)
-# print(train_rmse)
-print(test_rmse)
-
-# COMMAND ----------
-
-
