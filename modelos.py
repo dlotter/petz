@@ -12,22 +12,23 @@
 # MAGIC 
 # MAGIC ## Sumário
 # MAGIC 
-# MAGIC 1. Bibliotecas
-# MAGIC 2. Importação dos Dados
-# MAGIC 3. Análise Exploratória
-# MAGIC     1. Decomposição das séries temporais
-# MAGIC     2. Correlação e Autocorrelação
-# MAGIC 4. Feature Engineering
-# MAGIC     1. Anos Abertos
-# MAGIC     2. One hot encoding
-# MAGIC 5. Modelagem
-# MAGIC     1. Separação componentes da data
-# MAGIC     2. Join nas tabelas
-# MAGIC     3. Criação dos datasets de treino e teste
-# MAGIC     4. Baseline: modelo ingênuo
-# MAGIC     5. Regressão Linear
-# MAGIC     6. Random Forest
-# MAGIC 6. Considerações Finais
+# MAGIC 1. Bibliotecas.
+# MAGIC 2. Importação dos Dados.
+# MAGIC 3. Análise Exploratória.
+# MAGIC     1. Decomposição das séries temporais.
+# MAGIC     2. Correlação e Autocorrelação.
+# MAGIC 4. Feature Engineering.
+# MAGIC     1. Anos Abertos.
+# MAGIC     2. One hot encoding.
+# MAGIC 5. Modelagem.
+# MAGIC     1. Separação componentes da data.
+# MAGIC     2. Join nas tabelas.
+# MAGIC     3. Criação dos datasets de treino e teste.
+# MAGIC     4. Baseline: modelo simples.
+# MAGIC     5. Regressão Linear.
+# MAGIC     6. Random Forest.
+# MAGIC 6. Predição próximos 90 dias.
+# MAGIC 7. Considerações Finais.
 # MAGIC 
 # MAGIC 
 # MAGIC 
@@ -55,7 +56,7 @@ from pyspark.sql.functions import (
     pandas_udf,
     PandasUDFType,
     lag,
-    lit
+    lit,
 )
 from pyspark.sql import functions as F
 from pyspark.sql.types import *
@@ -89,11 +90,11 @@ from prophet import Prophet
 
 # COMMAND ----------
 
-canais = spark.read.table('canais')
-lojas = spark.read.table('lojas')
-produtos = spark.read.table('produtos')
-unidades_negocios = spark.read.table('unidades_negocios')
-vendas = spark.read.table('vendas')
+canais = spark.read.table("canais")
+lojas = spark.read.table("lojas")
+produtos = spark.read.table("produtos")
+unidades_negocios = spark.read.table("unidades_negocios")
+vendas = spark.read.table("vendas")
 
 # COMMAND ----------
 
@@ -104,15 +105,15 @@ vendas = spark.read.table('vendas')
 
 # COMMAND ----------
 
-vendas = vendas.withColumn('qtde_venda', regexp_replace('qtde_venda', ',', '.'))
-vendas = vendas.withColumn('qtde_venda', vendas['qtde_venda'].cast("float"))
-vendas = vendas.withColumn('valor_venda', regexp_replace('valor_venda', ',', '.'))
-vendas = vendas.withColumn('valor_venda', vendas['valor_venda'].cast("float"))
-vendas = vendas.withColumn('valor_imposto', regexp_replace('valor_imposto', ',', '.'))
-vendas = vendas.withColumn('valor_imposto', vendas['valor_imposto'].cast("float"))
-vendas = vendas.withColumn('valor_custo', regexp_replace('valor_custo', ',', '.'))
-vendas = vendas.withColumn('valor_custo', vendas['valor_custo'].cast("float"))
-vendas = vendas.withColumn('id_data',vendas.id_data.cast(DateType()))
+vendas = vendas.withColumn("qtde_venda", regexp_replace("qtde_venda", ",", "."))
+vendas = vendas.withColumn("qtde_venda", vendas["qtde_venda"].cast("float"))
+vendas = vendas.withColumn("valor_venda", regexp_replace("valor_venda", ",", "."))
+vendas = vendas.withColumn("valor_venda", vendas["valor_venda"].cast("float"))
+vendas = vendas.withColumn("valor_imposto", regexp_replace("valor_imposto", ",", "."))
+vendas = vendas.withColumn("valor_imposto", vendas["valor_imposto"].cast("float"))
+vendas = vendas.withColumn("valor_custo", regexp_replace("valor_custo", ",", "."))
+vendas = vendas.withColumn("valor_custo", vendas["valor_custo"].cast("float"))
+vendas = vendas.withColumn("id_data", vendas.id_data.cast(DateType()))
 
 # COMMAND ----------
 
@@ -123,7 +124,7 @@ vendas = vendas.withColumn('id_data',vendas.id_data.cast(DateType()))
 # COMMAND ----------
 
 print("Dataset completo: ", vendas.count())
-print("Dataset sem NaN: ", vendas.na.drop(how='any').count())
+print("Dataset sem NaN: ", vendas.na.drop(how="any").count())
 
 # COMMAND ----------
 
@@ -145,14 +146,23 @@ print("Dataset sem NaN: ", vendas.na.drop(how='any').count())
 
 # COMMAND ----------
 
-vendas = vendas.withColumn('ano_mes', concat(year(vendas.id_data), F.lit('-'),month(vendas.id_data)))
-vendas_por_mes = vendas.select('ano_mes', 'qtde_venda', 'valor_venda').groupBy('ano_mes').agg({'qtde_venda': 'sum', 'valor_venda': 'sum'}).toPandas()
-vendas_por_mes['ano_mes'] = pd.to_datetime(vendas_por_mes['ano_mes'], format='%Y-%m') + MonthEnd(0)
+vendas = vendas.withColumn(
+    "ano_mes", concat(year(vendas.id_data), F.lit("-"), month(vendas.id_data))
+)
+vendas_por_mes = (
+    vendas.select("ano_mes", "qtde_venda", "valor_venda")
+    .groupBy("ano_mes")
+    .agg({"qtde_venda": "sum", "valor_venda": "sum"})
+    .toPandas()
+)
+vendas_por_mes["ano_mes"] = pd.to_datetime(
+    vendas_por_mes["ano_mes"], format="%Y-%m"
+) + MonthEnd(0)
 
 # COMMAND ----------
 
-ax = sns.lineplot(data=vendas_por_mes, x='ano_mes', y='sum(qtde_venda)')
-ax.tick_params(axis='x', rotation=45)
+ax = sns.lineplot(data=vendas_por_mes, x="ano_mes", y="sum(qtde_venda)")
+ax.tick_params(axis="x", rotation=45)
 
 # COMMAND ----------
 
@@ -162,7 +172,10 @@ ax.tick_params(axis='x', rotation=45)
 
 # COMMAND ----------
 
-result_add = seasonal_decompose(vendas_por_mes.set_index('ano_mes')['sum(qtde_venda)'].sort_index(), model='multiplicative')
+result_add = seasonal_decompose(
+    vendas_por_mes.set_index("ano_mes")["sum(qtde_venda)"].sort_index(),
+    model="multiplicative",
+)
 figure = result_add.plot()
 figure.set_figheight(10)
 figure.set_figwidth(15)
@@ -182,14 +195,25 @@ figure.set_figwidth(15)
 
 # COMMAND ----------
 
-vendas_por_loja = vendas.select('ano_mes', 'id_loja', 'qtde_venda').groupBy('ano_mes', 'id_loja').sum().toPandas()
-vendas_por_loja['ano_mes'] = pd.to_datetime(vendas_por_loja['ano_mes'], format='%Y-%m') + MonthEnd(0)
-vendas_por_loja_merged = pd.merge(vendas_por_loja, lojas.toPandas(), how='inner', on='id_loja')
+vendas_por_loja = (
+    vendas.select("ano_mes", "id_loja", "qtde_venda")
+    .groupBy("ano_mes", "id_loja")
+    .sum()
+    .toPandas()
+)
+vendas_por_loja["ano_mes"] = pd.to_datetime(
+    vendas_por_loja["ano_mes"], format="%Y-%m"
+) + MonthEnd(0)
+vendas_por_loja_merged = pd.merge(
+    vendas_por_loja, lojas.toPandas(), how="inner", on="id_loja"
+)
 
 # COMMAND ----------
 
-ax = sns.lineplot(data=vendas_por_loja_merged, x='ano_mes', y='sum(qtde_venda)', hue='cod_loja')
-ax.tick_params(axis='x', rotation=45)
+ax = sns.lineplot(
+    data=vendas_por_loja_merged, x="ano_mes", y="sum(qtde_venda)", hue="cod_loja"
+)
+ax.tick_params(axis="x", rotation=45)
 plt.show()
 
 # COMMAND ----------
@@ -213,7 +237,7 @@ plt.show()
 
 # COMMAND ----------
 
-colunas_numericas = [ 'qtde_venda',  'valor_venda','valor_imposto','valor_custo']
+colunas_numericas = ["qtde_venda", "valor_venda", "valor_imposto", "valor_custo"]
 
 # convert to vector column first
 vector_col = "corr_features"
@@ -222,10 +246,12 @@ df_vector = assembler.transform(vendas).select(vector_col)
 
 # get correlation matrix
 matrix = Correlation.corr(df_vector, vector_col)
-matrix = Correlation.corr(df_vector, 'corr_features').collect()[0][0] 
-corr_matrix = matrix.toArray().tolist() 
-corr_matrix_df = pd.DataFrame(data=corr_matrix, columns = colunas_numericas, index=colunas_numericas) 
-corr_matrix_df .style.background_gradient(cmap='coolwarm').set_precision(2)
+matrix = Correlation.corr(df_vector, "corr_features").collect()[0][0]
+corr_matrix = matrix.toArray().tolist()
+corr_matrix_df = pd.DataFrame(
+    data=corr_matrix, columns=colunas_numericas, index=colunas_numericas
+)
+corr_matrix_df.style.background_gradient(cmap="coolwarm").set_precision(2)
 
 # COMMAND ----------
 
@@ -239,9 +265,14 @@ corr_matrix_df .style.background_gradient(cmap='coolwarm').set_precision(2)
 
 # COMMAND ----------
 
-vendas_por_dia = vendas.select('id_data', 'qtde_venda').groupBy('id_data').agg({'qtde_venda': 'sum'}).toPandas()
+vendas_por_dia = (
+    vendas.select("id_data", "qtde_venda")
+    .groupBy("id_data")
+    .agg({"qtde_venda": "sum"})
+    .toPandas()
+)
 
-vendas_por_dia = vendas_por_dia.set_index('id_data').sort_index()
+vendas_por_dia = vendas_por_dia.set_index("id_data").sort_index()
 
 ax = pd.plotting.autocorrelation_plot(vendas_por_dia)
 
@@ -269,7 +300,7 @@ ax.set_xlim([0, 550])
 
 # COMMAND ----------
 
-lojas = lojas.withColumn('anos_abertos', 2019 - col('ano_abertura'))
+lojas = lojas.withColumn("anos_abertos", 2019 - col("ano_abertura"))
 
 # COMMAND ----------
 
@@ -346,7 +377,9 @@ string_indexer = StringIndexer(inputCol="produto_nome", outputCol="produto_nome_
 indexed_df = string_indexer.fit(encoded_df).transform(encoded_df)
 
 # Create a OneHotEncoder to convert the indexed column to a one-hot encoded column
-one_hot_encoder = OneHotEncoder(inputCol="produto_nome_index", outputCol="produto_nome_vec")
+one_hot_encoder = OneHotEncoder(
+    inputCol="produto_nome_index", outputCol="produto_nome_vec"
+)
 encoded_df = one_hot_encoder.fit(indexed_df).transform(indexed_df)
 
 string_indexer = StringIndexer(inputCol="categoria", outputCol="categoria_index")
@@ -356,13 +389,16 @@ indexed_df = string_indexer.fit(encoded_df).transform(encoded_df)
 one_hot_encoder = OneHotEncoder(inputCol="categoria_index", outputCol="categoria_vec")
 encoded_df = one_hot_encoder.fit(indexed_df).transform(indexed_df)
 
-string_indexer = StringIndexer(inputCol="sub_categoria", outputCol="sub_categoria_index")
+string_indexer = StringIndexer(
+    inputCol="sub_categoria", outputCol="sub_categoria_index"
+)
 indexed_df = string_indexer.fit(encoded_df).transform(encoded_df)
 
 # Create a OneHotEncoder to convert the indexed column to a one-hot encoded column
-one_hot_encoder = OneHotEncoder(inputCol="sub_categoria_index", outputCol="sub_categoria_vec")
+one_hot_encoder = OneHotEncoder(
+    inputCol="sub_categoria_index", outputCol="sub_categoria_vec"
+)
 encoded_produtos = one_hot_encoder.fit(indexed_df).transform(indexed_df)
-
 
 # COMMAND ----------
 
@@ -373,11 +409,11 @@ encoded_produtos = one_hot_encoder.fit(indexed_df).transform(indexed_df)
 
 # COMMAND ----------
 
-colunas = ['id_data', 'id_loja', 'id_produto', 'qtde_venda']
+colunas = ["id_data", "id_loja", "id_produto", "qtde_venda"]
 
-colunas_group_by = ['id_data', 'id_loja', 'id_produto']
+colunas_group_by = ["id_data", "id_loja", "id_produto"]
 
-colunas_agg = {'qtde_venda': 'sum'}
+colunas_agg = {"qtde_venda": "sum"}
 
 vendas_grouped = vendas.select(colunas).groupBy(colunas_group_by).agg(colunas_agg)
 
@@ -395,12 +431,20 @@ print(vendas_grouped.count())
 
 # COMMAND ----------
 
-vendas_grouped = vendas_grouped.withColumn('ano', year(vendas_grouped.id_data))
-vendas_grouped = vendas_grouped.withColumn('mes', month(vendas_grouped.id_data))
-vendas_grouped = vendas_grouped.withColumn('dia_do_mes', dayofmonth(vendas_grouped.id_data))
-vendas_grouped = vendas_grouped.withColumn('dia_da_semana', dayofweek(vendas_grouped.id_data))
-vendas_grouped = vendas_grouped.withColumn('dia_do_ano', dayofyear(vendas_grouped.id_data))
-vendas_grouped = vendas_grouped.withColumn('semana_do_ano', weekofyear(vendas_grouped.id_data))
+vendas_grouped = vendas_grouped.withColumn("ano", year(vendas_grouped.id_data))
+vendas_grouped = vendas_grouped.withColumn("mes", month(vendas_grouped.id_data))
+vendas_grouped = vendas_grouped.withColumn(
+    "dia_do_mes", dayofmonth(vendas_grouped.id_data)
+)
+vendas_grouped = vendas_grouped.withColumn(
+    "dia_da_semana", dayofweek(vendas_grouped.id_data)
+)
+vendas_grouped = vendas_grouped.withColumn(
+    "dia_do_ano", dayofyear(vendas_grouped.id_data)
+)
+vendas_grouped = vendas_grouped.withColumn(
+    "semana_do_ano", weekofyear(vendas_grouped.id_data)
+)
 vendas_grouped.show()
 
 # COMMAND ----------
@@ -412,9 +456,9 @@ vendas_grouped.show()
 
 # COMMAND ----------
 
-vendas_merged = vendas_grouped \
-    .join(encoded_lojas, 'id_loja', how='inner') \
-    .join(encoded_produtos, vendas_grouped.id_produto==encoded_produtos.produto, how='inner')
+vendas_merged = vendas_grouped.join(encoded_lojas, "id_loja", how="inner").join(
+    encoded_produtos, vendas_grouped.id_produto == encoded_produtos.produto, how="inner"
+)
 
 vendas_merged.printSchema()
 
@@ -450,12 +494,14 @@ selected_columns = [
     "fornecedor_vec",
     "produto_nome_vec",
     "categoria_vec",
-    "sub_categoria_vec"
+    "sub_categoria_vec",
 ]
 
-target_column = ['sum(qtde_venda)']
+target_column = ["sum(qtde_venda)"]
 
-vendas_selected = vendas_merged.select(selected_columns + target_column + ['id_data', 'id_loja', 'id_produto'])
+vendas_selected = vendas_merged.select(
+    selected_columns + target_column + ["id_data", "id_loja", "id_produto"]
+)
 
 # COMMAND ----------
 
@@ -466,32 +512,33 @@ vendas_selected = vendas_merged.select(selected_columns + target_column + ['id_d
 
 # unlist = udf(lambda x: round(float(list(x)[0]),3), DoubleType())
 
-df = vendas_selected.alias('df')
+df = vendas_selected.alias("df")
 
 for i in selected_columns:
     # VectorAssembler Transformation - Converting column to vector type
-    assembler = VectorAssembler(inputCols=[i],outputCol=i+"_Vect")
+    assembler = VectorAssembler(inputCols=[i], outputCol=i + "_Vect")
 
     # MinMaxScaler Transformation
-    scaler = StandardScaler(inputCol=i+"_Vect", outputCol=i+"_Scaled")
+    scaler = StandardScaler(inputCol=i + "_Vect", outputCol=i + "_Scaled")
 
     # Pipeline of VectorAssembler and MinMaxScaler
     pipeline = Pipeline(stages=[assembler, scaler])
 
     # Fitting pipeline on dataframe
-    df = pipeline.fit(df).transform(df).drop(i+"_Vect")
-
+    df = pipeline.fit(df).transform(df).drop(i + "_Vect")
 
 # COMMAND ----------
 
 # features_columns = [i+"_Scaled" for i in selected_columns]
-features_columns = ['ano', 'mes', 'loja_vec', 'produto_nome_vec']
-assembler = VectorAssembler(inputCols=features_columns, outputCol='features')
+features_columns = ["ano", "mes", "loja_vec", "produto_nome_vec"]
+assembler = VectorAssembler(inputCols=features_columns, outputCol="features")
 vendas_vectorized = assembler.transform(df)
 
 # COMMAND ----------
 
-train_test_data = vendas_vectorized.withColumn("rank", percent_rank().over(Window.partitionBy().orderBy("id_data")))
+train_test_data = vendas_vectorized.withColumn(
+    "rank", percent_rank().over(Window.partitionBy().orderBy("id_data"))
+)
 
 train = train_test_data.where("rank <= .8").drop("rank")
 test = train_test_data.where("rank > .8").drop("rank")
@@ -507,15 +554,17 @@ print("Train antes: ", train.count(), train.rdd.getNumPartitions())
 print("Test antes: ", test.count(), test.rdd.getNumPartitions())
 train_partitions = train.repartition(15)
 test_partitions = test.repartition(10)
-print("Train depois: ", train_partitions.count(), train_partitions.rdd.getNumPartitions())
+print(
+    "Train depois: ", train_partitions.count(), train_partitions.rdd.getNumPartitions()
+)
 print("Test depois: ", test_partitions.count(), test_partitions.rdd.getNumPartitions())
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Baseline: modelo ingênuo
+# MAGIC ### Baseline: modelo simples
 # MAGIC 
-# MAGIC Em um primeiro momento, nossa estratégia inicial será criar um modelo "ingênuo", onde a predição para um produto `i` de uma loja `j` será apenas a média das quantidades vendidas para a combinação mês-ano `t`. Em termos algébricos:
+# MAGIC Em um primeiro momento, nossa estratégia inicial será criar um modelo simples, onde a predição para um produto `i` de uma loja `j` será apenas a média das quantidades vendidas para a combinação mês-ano `t`. Em termos algébricos:
 # MAGIC 
 # MAGIC $$ \frac{\sum_{}^{}a_{ij}^{t}}{n} $$
 # MAGIC 
@@ -528,19 +577,33 @@ print("Test depois: ", test_partitions.count(), test_partitions.rdd.getNumPartit
 
 # COMMAND ----------
 
-train_naive_fit = train_partitions.select('ano', 'mes', 'id_loja', 'id_produto', 'sum(qtde_venda)').groupBy('ano', 'mes', 'id_loja', 'id_produto').agg({'sum(qtde_venda)': 'mean'})
+train_naive_fit = (
+    train_partitions.select("ano", "mes", "id_loja", "id_produto", "sum(qtde_venda)")
+    .groupBy("ano", "mes", "id_loja", "id_produto")
+    .agg({"sum(qtde_venda)": "mean"})
+)
 
 # COMMAND ----------
 
-train_naive_predict = train_partitions.select('ano', 'mes', 'id_loja', 'id_produto', 'sum(qtde_venda)').join(train_naive_fit, ['ano', 'mes', 'id_loja', 'id_produto']).withColumnRenamed('avg(sum(qtde_venda))',"prediction")
+train_naive_predict = (
+    train_partitions.select("ano", "mes", "id_loja", "id_produto", "sum(qtde_venda)")
+    .join(train_naive_fit, ["ano", "mes", "id_loja", "id_produto"])
+    .withColumnRenamed("avg(sum(qtde_venda))", "prediction")
+)
 
 # COMMAND ----------
 
-test_naive_predict = test_partitions.select('ano', 'mes', 'id_loja', 'id_produto', 'sum(qtde_venda)').join(train_naive_fit, ['ano', 'mes', 'id_loja', 'id_produto']).withColumnRenamed('avg(sum(qtde_venda))',"prediction")
+test_naive_predict = (
+    test_partitions.select("ano", "mes", "id_loja", "id_produto", "sum(qtde_venda)")
+    .join(train_naive_fit, ["ano", "mes", "id_loja", "id_produto"])
+    .withColumnRenamed("avg(sum(qtde_venda))", "prediction")
+)
 
 # COMMAND ----------
 
-evaluator = RegressionEvaluator(labelCol="sum(qtde_venda)", predictionCol="prediction", metricName="rmse")
+evaluator = RegressionEvaluator(
+    labelCol="sum(qtde_venda)", predictionCol="prediction", metricName="rmse"
+)
 
 train_rmse = evaluator.evaluate(train_naive_predict)
 test_rmse = evaluator.evaluate(test_naive_predict)
@@ -589,11 +652,15 @@ test_partitions = assembler.transform(test_partitions)
 
 # COMMAND ----------
 
-lr_classifier = LinearRegression(featuresCol='features_lr', labelCol='sum(qtde_venda)').fit(train_partitions)
+lr_classifier = LinearRegression(
+    featuresCol="features_lr", labelCol="sum(qtde_venda)"
+).fit(train_partitions)
 lr_train_predictions = lr_classifier.transform(train_partitions)
 lr_test_predictions = lr_classifier.transform(test_partitions)
 
-evaluator = RegressionEvaluator(labelCol="sum(qtde_venda)", predictionCol="prediction", metricName="rmse")
+evaluator = RegressionEvaluator(
+    labelCol="sum(qtde_venda)", predictionCol="prediction", metricName="rmse"
+)
 
 lr_train_rmse = evaluator.evaluate(lr_train_predictions)
 lr_test_rmse = evaluator.evaluate(lr_test_predictions)
@@ -604,95 +671,22 @@ print(lr_test_rmse)
 
 # MAGIC %md
 # MAGIC 
-# MAGIC Note que a performance desse modelo foi pior do que o modelo "ingênuo", e os motivos disso são claros. Primeiro, para modelos de regressão linear o ideal é tirar a primeira diferença e ter uma série estacionária. Não obstante, no dataset de teste, para prever a primeira amostra, bastaria pegar o valor real da variável de interesse da última observação e usar como feature para a predição. Para a segunda observação, porém, teriamos que pegar o resultado da primeira predição e usa-lo como feature. E assim sucessivamente. Ou seja, fazer um modelo autoregressivo.
+# MAGIC Note que a performance desse modelo foi pior do que o modelo simples, e os motivos disso são claros. Primeiro, para modelos de regressão linear o ideal é tirar a primeira diferença e ter uma série estacionária. Não obstante, no dataset de teste, para prever a primeira amostra, bastaria pegar o valor real da variável de interesse da última observação e usar como feature para a predição. Para a segunda observação, porém, teriamos que pegar o resultado da primeira predição e usa-lo como feature. E assim sucessivamente. Ou seja, fazer um modelo autoregressivo.
 # MAGIC 
 # MAGIC Não tive tempo hábil de decifrar como fazer isso no pyspark de maneira eficiente. Fiquei bloqueado em como fazer a predição autoregressiva. O statsmodel oferece o modelo ARIMA, mas nativamente não roda em paralelo.
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Prophet 
-
-# COMMAND ----------
-
-# Create a StringIndexer to convert the categorical feature to an indexed column
-string_indexer = StringIndexer(inputCol="id_loja", outputCol="id_loja_idx")
-indexed_df = string_indexer.fit(train_partitions).transform(train_partitions)
-
-# Create a StringIndexer to convert the categorical feature to an indexed column
-string_indexer = StringIndexer(inputCol="id_produto", outputCol="id_produto_idx")
-indexed_df = string_indexer.fit(indexed_df).transform(indexed_df)
-
-# COMMAND ----------
-
-schema = StructType([
-                     StructField('id_loja_idx', FloatType()),
-                     StructField('id_produto_idx', FloatType()),
-                     StructField('ds', TimestampType()),
-                     StructField('y', FloatType()),
-                     StructField('yhat', DoubleType()),
-                     StructField('yhat_upper', DoubleType()),
-                     StructField('yhat_lower', DoubleType()),
-])
-
-# COMMAND ----------
-
-# define the Pandas UDF
-@pandas_udf(schema, PandasUDFType.GROUPED_MAP)
-def apply_model(store_pd):
-    # instantiate the model and set parameters
-    model = Prophet(
-        interval_width=0.95,
-        growth="linear",
-        daily_seasonality=False,
-        weekly_seasonality=True,
-        yearly_seasonality=True,
-        seasonality_mode="multiplicative",
-    )
-    # fit the model to historical data
-    model.fit(store_pd)
-    # Create a data frame that lists 90 dates starting from Jan 1 2018
-    future = model.make_future_dataframe(periods=90, freq="d", include_history=True)
-    # Out of sample prediction
-    future = model.predict(future)
-     # Create a data frame that contains store, item, y, and yhat
-    f_pd = future[['ds', 'yhat', 'yhat_upper', 'yhat_lower']]
-    f_pd['ds'] = pd.to_datetime(f_pd['ds'])
-    st_pd = store_pd[['ds', 'id_loja_idx', 'id_produto_idx', 'y']]
-    st_pd['ds'] = pd.to_datetime(st_pd['ds'])
-    result_pd = f_pd.join(st_pd.set_index('ds'), on='ds', how='left')
-    # fill store and item
-    result_pd['id_loja_idx'] = store_pd['id_loja_idx'].iloc[0]
-    result_pd['id_produto_idx'] = store_pd['id_produto_idx'].iloc[0]
-    return result_pd[['id_loja_idx', 'id_produto_idx', 'ds', 'y', 'yhat',
-                    'yhat_upper', 'yhat_lower']]
-
-
-# Apply the function to all store-items
-results = (
-    indexed_df.select("id_data", "sum(qtde_venda)", 'id_loja_idx', 'id_produto_idx')
-    .withColumnRenamed("id_data", "ds")
-    .withColumnRenamed("sum(qtde_venda)", "y")
-    .groupBy('id_loja_idx', 'id_produto_idx')
-    .apply(apply_model)
-)
-
-# COMMAND ----------
-
-indexed_df.select('id_data', 'sum(qtde_venda)').orderBy(col('id_data').desc()).show()
-
-# COMMAND ----------
-
-results.orderBy(col('ds').desc()).show()
-
-# COMMAND ----------
-
-# MAGIC %md
 # MAGIC ### Random Forest
+# MAGIC 
+# MAGIC Por fim, testaremos o modelo random forest. Usaremos 20 para o hiperparâmetro número de árvores e 5 de profundidade máxima.
 
 # COMMAND ----------
 
-rf_classifier = RandomForestRegressor(featuresCol='features', labelCol='sum(qtde_venda)', numTrees=5).fit(train_partitions)
+rf_classifier = RandomForestRegressor(
+    featuresCol="features_lr", labelCol="sum(qtde_venda)", numTrees=20, maxDepth = 5
+).fit(train_partitions)
 
 # COMMAND ----------
 
@@ -701,7 +695,9 @@ test_predictions = rf_classifier.transform(test_partitions)
 
 # COMMAND ----------
 
-evaluator = RegressionEvaluator(labelCol="sum(qtde_venda)", predictionCol="prediction", metricName="rmse")
+evaluator = RegressionEvaluator(
+    labelCol="sum(qtde_venda)", predictionCol="prediction", metricName="rmse"
+)
 
 train_rmse = evaluator.evaluate(train_predictions)
 test_rmse = evaluator.evaluate(test_predictions)
@@ -711,11 +707,76 @@ print(test_rmse)
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC 
+# MAGIC O modelo performou pior que o modelo de baseline. Por motivos de velocidade na execução, não foi feito cross validation e isso explica a performance ruim.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Predição próximos 90 dias.
+# MAGIC 
+# MAGIC Usaremos o modelo de baseline para prever a demanda para cada produto nos próximos 90 dias. Para isso, iremos prever a demanda de cada produto em cada loja a cada dia e agregar a quantidade demandada por loja.
+# MAGIC Como não temos dados para o ano de 2020 no modelo simples, iremos usar os dados do ano anterior.
+
+# COMMAND ----------
+
+from pyspark.sql.functions import sequence, to_date, explode, col
+
+to_predict = spark.sql("SELECT sequence(to_date('2019-01-01'), to_date('2019-03-30'), interval 1 day) as date").withColumn("id_data_temp", explode(col("date")))
+
+# COMMAND ----------
+
+lojas_distinct = lojas.select('id_loja').distinct()
+produtos_distinct = produtos.select(col('produto').alias('id_produto')).distinct()
+
+# COMMAND ----------
+
+to_predict = to_predict.crossJoin(lojas_distinct).crossJoin(produtos_distinct)
+
+# COMMAND ----------
+
+to_predict = to_predict.drop('date')
+
+# COMMAND ----------
+
+to_predict = to_predict.withColumn("ano", year(to_predict.id_data_temp))
+to_predict = to_predict.withColumn("mes", month(to_predict.id_data_temp))
+
+# COMMAND ----------
+
+# Aqui devemos fazer um left join entre to_predict e o "modelo" treinado (train_naive_fit) para não
+# perdermos dados que queremos prever.
+
+predictions = (
+    to_predict
+    .join(train_naive_fit, ["ano", "mes", "id_loja", "id_produto"], how='left')
+    .withColumnRenamed("avg(sum(qtde_venda))", "prediction")
+)
+
+# COMMAND ----------
+
+predictions = predictions.withColumn('id_data', F.add_months('id_data_temp', 12))
+
+# COMMAND ----------
+
+predictions = predictions.fillna(0)
+
+# COMMAND ----------
+
+predictions_final = predictions.select('id_data', 'id_loja', 'id_produto', 'prediction').groupBy('id_data', 'id_produto').agg({'prediction': 'sum'}).orderBy(col('id_data').desc())
+
+# COMMAND ----------
+
+predictions_final.toPandas().to_csv('predictions.csv')
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Considerações finais
 # MAGIC 
 # MAGIC **Como melhorar os modelos?**
 # MAGIC 
-# MAGIC Devido às restrições de tempo, não foi possível realizar algumas melhorias que talvez melhorassem a performance do modelo.
+# MAGIC Devido às restrições de tempo, não foi possível realizar algumas melhorias que talvez melhorassem a performance do modelo. Discorremos sobre essas melhorias ao longo do texto.
 # MAGIC 
 # MAGIC - Rolling Time Series Cross Validation.
 # MAGIC - Inserir Lags para capturar efeitos de momentum e sazonalidade.
@@ -724,5 +785,6 @@ print(test_rmse)
 # MAGIC - Adicionar dados de externos, como feriados e nível de desemprego.
 # MAGIC 
 # MAGIC **Outros modelos que queria testar**
-# MAGIC - ARIMA
-# MAGIC - LSTM
+# MAGIC - **ARIMA**: A motivação de usar esse modelo se dá por nossa série principal (qtde_venda), quando olhada individualmente, ser do tipo série temporal. O modelo ARIMA soluciona 3 problemas que identificamos nos dados: i. A existência de autocorrelação. Nesse caso por ser um modelo autoregressivo (AR), a predição levaria em consideração dados do passado; ii. A existência de tendências de longo prazo. Nesse caso é tratado pela existência do componente de média móvel (MA); e, por fim, iii. A não estacionaridade da amostra, que é tratada pelo componente (I) do modelo, ou seja, quantas vezes tirar a primeira diferença.
+# MAGIC - **LSTM**: A motivação de usar um modelo de Deep Learning neste caso se dá pelo fato de termos muitos dados, cenário onde tais tipos de algorítmos performam melhor, sobretudo o LSTM. Não obstante, estamos tratando de dados em painel, ou seja, onde há ordem nos dados com base no tempo, e o LSTM leva em consideração dados de dias anterirores.
+# MAGIC - **Um modelo para cada janela de predição**: Por fim, outro teste válido a se fazer é o de criar diferentes modelos para diferentes janelas de predição (30d, 60d ou 90d). Isso serve pois predições para os próximos 30d devem levar mais em consideração flutuações de curto prazo, enquanto que modelos de médio/longo prazo (90d) devem dar mais importância a tendências de longo prazo.
