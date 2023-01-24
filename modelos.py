@@ -57,6 +57,10 @@ from pyspark.sql.functions import (
     PandasUDFType,
     lag,
     lit,
+    sequence,
+    to_date,
+    explode,
+    col,
 )
 from pyspark.sql import functions as F
 from pyspark.sql.types import *
@@ -716,11 +720,17 @@ print(test_rmse)
 # MAGIC ## Predição próximos 90 dias.
 # MAGIC 
 # MAGIC Usaremos o modelo de baseline para prever a demanda para cada produto nos próximos 90 dias. Para isso, iremos prever a demanda de cada produto em cada loja a cada dia e agregar a quantidade demandada por loja.
-# MAGIC Como não temos dados para o ano de 2020 no modelo simples, iremos usar os dados do ano anterior.
+# MAGIC 
+# MAGIC **Passos**:
+# MAGIC 1. Criar dataframe com 90 novos dias, a partir da data final.
+# MAGIC 2. Fazer cross join entre datas novas, lojas distintas e produtos distintos.
+# MAGIC 3. Criar features de ano e mês.
+# MAGIC 4. Prever novos valores.
+# MAGIC 5. Salvar como csv.
+# MAGIC 
+# MAGIC Como não temos dados para o ano de 2020 no modelo simples, iremos usar os dados do ano anterior. Dessa maneira, criamos uma coluna `id_data_temp` como auxiliar para essa operação.
 
 # COMMAND ----------
-
-from pyspark.sql.functions import sequence, to_date, explode, col
 
 to_predict = spark.sql("SELECT sequence(to_date('2019-01-01'), to_date('2019-03-30'), interval 1 day) as date").withColumn("id_data_temp", explode(col("date")))
 
