@@ -1,9 +1,13 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC 
+# MAGIC <img src="https://s3.amazonaws.com/gupy5/production/companies/1130/career/1714/images/2022-07-29_17-08_mainImage.jpg">
+# MAGIC 
 # MAGIC # Case Petz
 # MAGIC 
-# MAGIC Esse notebook contém a resolução do case de predição de demanda da Petz.
+# MAGIC Olá! Seja muito bem vindo à minha resolução do case da Petz. O objetivo desse estudo é criar previsões de demanda para os próximos 30, 60 e 90 dias (a partir da data final do dataset).
+# MAGIC 
+# MAGIC Para isso, iremos utilizar diversas ferramentas e técnicas diferentes. Iniciamos com a importação das biliotecas e dos dados. Em seguida analisamos os dados para capturar tendências e features importantes. Com isso em mente criamos novas features e, finalmente, criamos os modelos de predição.
 # MAGIC 
 # MAGIC 
 # MAGIC ## Sumário
@@ -23,10 +27,13 @@
 # MAGIC     4. Baseline: modelo ingênuo
 # MAGIC     5. Regressão Linear
 # MAGIC     6. Random Forest
+# MAGIC 6. Considerações Finais
 # MAGIC 
 # MAGIC 
 # MAGIC 
 # MAGIC ## Bibliotecas
+# MAGIC 
+# MAGIC As tecnologias usadas nesse estudo foram: `pyspark`, `pandas`, `matplotlib`, `seaborn`, `statsmodels` e o `prophet`.
 
 # COMMAND ----------
 
@@ -90,6 +97,13 @@ vendas = spark.read.table('vendas')
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC Antes de prosseguirmos com a análise, devemos fazer um breve tratamento dos dados da tabela de vendas. As colunas `qtde_venda`, `valor_venda`, `valor_imposto`, `valor_custo` tem como separador da casa decimal o caracter ",". Substituiremos por "." e transformaremos a coluna de `StringType` para `FloatType`.
+# MAGIC 
+# MAGIC Por fim, a coluna `id_data`  deve ser transformada para `DataType`.
+
+# COMMAND ----------
+
 vendas = vendas.withColumn('qtde_venda', regexp_replace('qtde_venda', ',', '.'))
 vendas = vendas.withColumn('qtde_venda', vendas['qtde_venda'].cast("float"))
 vendas = vendas.withColumn('valor_venda', regexp_replace('valor_venda', ',', '.'))
@@ -102,9 +116,14 @@ vendas = vendas.withColumn('id_data',vendas.id_data.cast(DateType()))
 
 # COMMAND ----------
 
-print(vendas.dropna().count())
-print(vendas.count())
-print(vendas.na.drop(how='any').count())
+# MAGIC %md
+# MAGIC 
+# MAGIC Checamos para dados faltantes no nosso dataset principal (`vendas`). Note que o tamanho do dataset não muda após remover observações com dados faltantes.
+
+# COMMAND ----------
+
+print("Dataset completo: ", vendas.count())
+print("Dataset sem NaN: ", vendas.na.drop(how='any').count())
 
 # COMMAND ----------
 
@@ -116,6 +135,11 @@ print(vendas.na.drop(how='any').count())
 
 # MAGIC %md
 # MAGIC ### Decomposição das Séries Temporais
+# MAGIC 
+# MAGIC Começamos a análise exploratória dos dados decompondo a série temporal de interesse (`qtde_venda`) pela tendência, sazonalidade e ruído. Essa análise é importante por uma série de motivos. Tome, por exemplo, o modelo de regressão linear, que perfoma melhor quando a série é estacionária, i.e., não há tendência positiva ou negativa.
+# MAGIC Não obstante, a sazonalidade dá mais informações para o modelo e melhora sua robustez de predição, ao passo que certas observações podem ser mais facilmente previstas se obedecerem à alguma regra de sazonalidade. Um exemplo claro disso é o aumento de vendas que ocorre no setor de varejo no fim de ano.
+# MAGIC 
+# MAGIC Iniciaremos observando o comportamento da série por si só.
 # MAGIC 
 # MAGIC #### Vendas Gerais
 
@@ -132,6 +156,12 @@ ax.tick_params(axis='x', rotation=45)
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC 
+# MAGIC Ao olho "nu", observamos que há uma tendência positiva. Confirmamos isso ao decompor a série. Vide gráfico abaixo.
+
+# COMMAND ----------
+
 result_add = seasonal_decompose(vendas_por_mes.set_index('ano_mes')['sum(qtde_venda)'].sort_index(), model='multiplicative')
 figure = result_add.plot()
 figure.set_figheight(10)
@@ -140,7 +170,15 @@ figure.set_figwidth(15)
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC 
+# MAGIC Confirmando nossa hipótese inicial, há tendência positiva na série entre os meses de 2018-08 e 2019-07. Nota-se, além disso, alguns compostamentos sazonais. A cada 12 meses, há um aumento das vendas em janeiro seguido de uma queda nos meses de fevereiro e março. O aumento das vendas pode ser desencadeado pelos feriados de fim de ano e pela época de recebimento do 13º.
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC #### Vendas por loja
+# MAGIC 
+# MAGIC Outro fator possivelmente muito importante de ser capturado pelos modelos é o efeito das diferentes lojas. Abaixos iremos decompor a série original para cada tipo de loja.
 
 # COMMAND ----------
 
@@ -157,7 +195,21 @@ plt.show()
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC 
+# MAGIC Esse gráfico nos dá algumas informações:
+# MAGIC 
+# MAGIC 1) Nem todas as lojas tem a mesma quantidade de demanda. Nota-se que a Loja 3 vende mais, enquanto a Loja 2 vende menos. E as demais gravitam no meio dessas duas.
+# MAGIC 2) Nem todas as lojas foram criadas no mesmo ano. Note que a Loja 5 surje no ano de 2018, enquanto as demais já existiam anteriormente. Iremos capturar essa informação na seção de ***Feature Engineering***, criando a coluna de Anos Abertos.
+# MAGIC 3) As lojas obedecem, em média, as variações de sazonalidade. Quando há uma tendência de aumento da demanda, todas aumentam. As explicações para isso são diversas, mas dentre elas uma possível é que existam variáveis exógenas ao modelo (data é um feriado, variações na taxa de desemprego).
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ### Correlação e Autocorrelação
+# MAGIC 
+# MAGIC Iremos analisar as correlações entre algumas variáveis e a correlação da série de interesse com ela mesma. A primeira etapa é importante para removermos variáveis do modelo que possuem alta correlação entre si, evitando problemas de multicolinearidade. Esse tipo de problema afeta modelos como o de regressão linear. 
+# MAGIC 
+# MAGIC Não obstante, a autocorrelação irá servir para termos uma ideia geral de como as observações passadas impactam o valor atual. Isso é importante para criarmos novas features (`lags`) e também para melhor ajustar modelos como o ARIMA.
 
 # COMMAND ----------
 
@@ -177,6 +229,16 @@ corr_matrix_df .style.background_gradient(cmap='coolwarm').set_precision(2)
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC 
+# MAGIC Note que, apesar de pouca correlação entre a quantidade vendida e as demais variáveis númericas do dataset, há forte correlação entre as variáveis que não são de interesse, i.e., `valor_venda`, `valor_imposto`, `valor_custo`. Isso faz sentido ao passo que o imposto é uma função do valor da venda (% da venda, por exemplo). E também porque o valor da venda é função do valor do custo, já que a empresa provavelmente define um mark-up (% acima do valor de custo do produto).
+# MAGIC 
+# MAGIC Assim, podemos deixar em nosso modelo, **ao máximo**, uma das variáveis que não a de interesse. Ou `valor_venda`, ou `valor_imposto` ou `valor_custo`.
+# MAGIC 
+# MAGIC Abaixo, prosseguimos para a análise da autocorrelação de `qtde_venda`.
+
+# COMMAND ----------
+
 vendas_por_dia = vendas.select('id_data', 'qtde_venda').groupBy('id_data').agg({'qtde_venda': 'sum'}).toPandas()
 
 vendas_por_dia = vendas_por_dia.set_index('id_data').sort_index()
@@ -188,8 +250,17 @@ ax.set_xlim([0, 550])
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC Note que há autocorrelação estatisticamente significativa até a defasagem de ordem 500. 
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC 
 # MAGIC ## Feature Engineering
+# MAGIC 
+# MAGIC Iremos agora criar novas colunas com base nas existentes para extrairmos mais informações dos dados fornecidos. Começando com uma das primeiras informações de nossa análise exploratória: a existência de lojas com idades diferentes.
+# MAGIC 
+# MAGIC Observe, entretanto, que o processo exploratório é iterativo e mais adiante, fora desta seção, criaremos novas features.
 
 # COMMAND ----------
 
@@ -204,6 +275,20 @@ lojas = lojas.withColumn('anos_abertos', 2019 - col('ano_abertura'))
 
 # MAGIC %md
 # MAGIC ### One hot encoding
+# MAGIC 
+# MAGIC Os datasets `lojas` e `produtos` trazem novas e relevantes informações sobre os estabelecimentos e das mercadorias.
+
+# COMMAND ----------
+
+lojas.printSchema()
+produtos.printSchema()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Note que cada loja apresenta uma região, distrito, cidade e unidade federativa diferentes. Entretanto, como estão (`StringType`) não podem ser processados pelos modelos. Devemos, portanto, realizar o One Hot Encoding para transformar nossas variáveis categoricas em númericas sem que se crie relação de ordem entre elas.
+# MAGIC 
+# MAGIC O mesmo ocorre para os dados de produtos.
 
 # COMMAND ----------
 
@@ -283,6 +368,8 @@ encoded_produtos = one_hot_encoder.fit(indexed_df).transform(indexed_df)
 
 # MAGIC %md
 # MAGIC ## Modelagem
+# MAGIC 
+# MAGIC Iniciaremos nossa modelagem reduzindo a dimensão dos dados, selecionando as colunas relevantes até agora.
 
 # COMMAND ----------
 
@@ -303,6 +390,8 @@ print(vendas_grouped.count())
 
 # MAGIC %md
 # MAGIC ### Separação ano, mês, dia, número da semana, número do dia na semana
+# MAGIC 
+# MAGIC Com o dataset dessa maneira fica mais fácil criar novas features que contém informações relevantes da data. Por isso reservamos essa etapa para agora. As informações que conseguimos extrair são: ano, mês, dia do mês, dia da semana, dia do ano e semana do ano.
 
 # COMMAND ----------
 
@@ -318,6 +407,8 @@ vendas_grouped.show()
 
 # MAGIC %md
 # MAGIC ### Join nas tabelas
+# MAGIC 
+# MAGIC Com as informações de data das vendas ja tratados, podemos inserir as informações de lojas e produtos das demais tabelas. Faremos isso a partir de um join entre `vendas`, `lojas` e `produtos`.
 
 # COMMAND ----------
 
@@ -331,6 +422,15 @@ vendas_merged.printSchema()
 
 # MAGIC %md
 # MAGIC ### Criação dos datasets de treino e teste.
+# MAGIC 
+# MAGIC Com os dados tratados, iremos separar nossa amostra em treino e teste. A rigor, para dados em painel, o ideal é separarmos os dados seguindo a ordem cronológica. O motivo de não usarmos `RandomSplit`, por exemplo, é porque isso pode adicionar viés em nosso modelo, onde ele irá capturar informações do futuro que, naquela data, ainda não existiam.
+# MAGIC 
+# MAGIC Aliado à isso, para termos o melhor modelo, idealmente teriamos que fazer algo como um *rolling time series cross validation*. Ou seja, separar o dataset de treino e teste com base em uma janela movel, respeitando a ordem das observações. Essa abordagem também cria um espaço entre os datasets para predições mais verídicas, já que não estamos apenas interessados em predições de apenas 1 período a frente. Abaixo uma ilustração.
+# MAGIC 
+# MAGIC Entretanto, devido à restrição de tempo, não pude fazer isso aqui. No sklearn é possível fazer o mesmo com a função `TimeSeriesSplit()`.
+# MAGIC 
+# MAGIC 
+# MAGIC <img src="https://user-images.githubusercontent.com/28893120/154545460-d1629e8a-22a4-494d-affc-2df3cb95ade7.png">
 
 # COMMAND ----------
 
@@ -356,6 +456,11 @@ selected_columns = [
 target_column = ['sum(qtde_venda)']
 
 vendas_selected = vendas_merged.select(selected_columns + target_column + ['id_data', 'id_loja', 'id_produto'])
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Como temos dados em diferentes proporções, iremos normalizar cada coluna para que a robustez do modelo melhore, usando `StandardScaler`.
 
 # COMMAND ----------
 
@@ -393,6 +498,11 @@ test = train_test_data.where("rank > .8").drop("rank")
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC Abaixo noto que, após a divisão do dataset, o número de partições cai para 1, reduzindo significativamente a performance do código. Trato isso aumentando o número de partições.
+
+# COMMAND ----------
+
 print("Train antes: ", train.count(), train.rdd.getNumPartitions())
 print("Test antes: ", test.count(), test.rdd.getNumPartitions())
 train_partitions = train.repartition(15)
@@ -405,7 +515,16 @@ print("Test depois: ", test_partitions.count(), test_partitions.rdd.getNumPartit
 # MAGIC %md
 # MAGIC ### Baseline: modelo ingênuo
 # MAGIC 
-# MAGIC Para esse modelo, vamos pegar a média de quantidades vendidas dos produtos por loja e por dia-mês.
+# MAGIC Em um primeiro momento, nossa estratégia inicial será criar um modelo "ingênuo", onde a predição para um produto `i` de uma loja `j` será apenas a média das quantidades vendidas para a combinação mês-ano `t`. Em termos algébricos:
+# MAGIC 
+# MAGIC $$ \frac{\sum_{}^{}a_{ij}^{t}}{n} $$
+# MAGIC 
+# MAGIC Onde,
+# MAGIC 
+# MAGIC t = mes-ano.  
+# MAGIC i = produto.  
+# MAGIC j = loja.  
+# MAGIC n = número de observações para determinada combinação de loja, produto e mes-ano.
 
 # COMMAND ----------
 
@@ -425,17 +544,52 @@ evaluator = RegressionEvaluator(labelCol="sum(qtde_venda)", predictionCol="predi
 
 train_rmse = evaluator.evaluate(train_naive_predict)
 test_rmse = evaluator.evaluate(test_naive_predict)
-print(train_rmse)
-print(test_rmse)
+print("RMSE (treino): ", train_rmse)
+print("RMSE (teste): ", test_rmse)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC 
+# MAGIC Obtemos com esse estimador um valor de RMSE de 1.5 para o dataset de treino e 1.76 para o dataset de teste. Os valores estão de acordo com o que era de se esperar, já que com dados novos nosso modelo performa "pior".
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ### Regressão Linear
+# MAGIC 
+# MAGIC Iremos agora realizar o modelo de regressão linear.
 
 # COMMAND ----------
 
-lr_classifier = LinearRegression(featuresCol='features', labelCol='sum(qtde_venda)').fit(train_partitions)
+features_lr = [
+    "ano_Scaled",
+    "mes_Scaled",
+    "dia_do_mes_Scaled",
+    "dia_da_semana_Scaled",
+    "dia_do_ano_Scaled",
+    "semana_do_ano_Scaled",
+    "anos_abertos_Scaled",
+    "loja_vec_Scaled",
+    "regional_vec_Scaled",
+    "distrito_vec_Scaled",
+    "cidade_vec_Scaled",
+    "uf_vec_Scaled",
+    "fornecedor_vec_Scaled",
+    "produto_nome_vec_Scaled",
+    "categoria_vec_Scaled",
+    "sub_categoria_vec_Scaled",
+]
+assembler = VectorAssembler(inputCols=features_lr, outputCol="features_lr")
+train_partitions = assembler.transform(train_partitions)
+
+# COMMAND ----------
+
+test_partitions = assembler.transform(test_partitions)
+
+# COMMAND ----------
+
+lr_classifier = LinearRegression(featuresCol='features_lr', labelCol='sum(qtde_venda)').fit(train_partitions)
 lr_train_predictions = lr_classifier.transform(train_partitions)
 lr_test_predictions = lr_classifier.transform(test_partitions)
 
@@ -448,9 +602,16 @@ print(lr_test_rmse)
 
 # COMMAND ----------
 
-window = Window.partitionBy('id_loja', 'id_produto').orderBy("id_data")
+# MAGIC %md
+# MAGIC 
+# MAGIC Note que a performance desse modelo foi pior do que o modelo "ingênuo", e os motivos disso são claros. Primeiro, para modelos de regressão linear o ideal é tirar a primeira diferença e ter uma série estacionária. Não obstante, no dataset de teste, para prever a primeira amostra, bastaria pegar o valor real da variável de interesse da última observação e usar como feature para a predição. Para a segunda observação, porém, teriamos que pegar o resultado da primeira predição e usa-lo como feature. E assim sucessivamente. Ou seja, fazer um modelo autoregressivo.
+# MAGIC 
+# MAGIC Não tive tempo hábil de decifrar como fazer isso no pyspark de maneira eficiente. Fiquei bloqueado em como fazer a predição autoregressiva. O statsmodel oferece o modelo ARIMA, mas nativamente não roda em paralelo.
 
-train_lagged = train_partitions.withColumn("lag",lag("sum(qtde_venda)",1).over(window))
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Prophet 
 
 # COMMAND ----------
 
@@ -546,3 +707,22 @@ train_rmse = evaluator.evaluate(train_predictions)
 test_rmse = evaluator.evaluate(test_predictions)
 print(train_rmse)
 print(test_rmse)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Considerações finais
+# MAGIC 
+# MAGIC **Como melhorar os modelos?**
+# MAGIC 
+# MAGIC Devido às restrições de tempo, não foi possível realizar algumas melhorias que talvez melhorassem a performance do modelo.
+# MAGIC 
+# MAGIC - Rolling Time Series Cross Validation.
+# MAGIC - Inserir Lags para capturar efeitos de momentum e sazonalidade.
+# MAGIC - Tirar a primeira diferença para tratar a tendência positiva.
+# MAGIC - Feature hashing nas colunas que possuem muitas categorias diferentes, por exemplo, cliente, tipo de cliente, etc.
+# MAGIC - Adicionar dados de externos, como feriados e nível de desemprego.
+# MAGIC 
+# MAGIC **Outros modelos que queria testar**
+# MAGIC - ARIMA
+# MAGIC - LSTM
